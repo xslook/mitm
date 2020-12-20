@@ -62,12 +62,6 @@ func (p Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p Proxy) takeover(w http.ResponseWriter, r *http.Request) {
-	if r.TLS == nil {
-		if p.fn != nil {
-			p.fn(w, r)
-		}
-		return
-	}
 	if p.ca == nil || len(p.ca.Certificate) < 1 {
 		http.Error(w, "invalid CA certificate", http.StatusInternalServerError)
 		return
@@ -91,6 +85,8 @@ func (p Proxy) takeover(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	w.WriteHeader(http.StatusOK)
+
 	tlsConfg := &tls.Config{
 		Certificates: []tls.Certificate{*cert},
 	}
@@ -99,10 +95,10 @@ func (p Proxy) takeover(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
 
 	sconn := tls.Server(hijack, tlsConfg)
 	defer sconn.Close()
+	sconn.SetReadDeadline(time.Now().Add(30 * time.Second))
 
 	// create a mitm ResponseWriter
 	mw := &mitmResponseWriter{
@@ -134,16 +130,17 @@ func (w mitmResponseWriter) WriteHeader(statusCode int) {
 		return
 	}
 	statusText := http.StatusText(statusCode)
-	w.writer.WriteString(fmt.Sprintf("HTTP/1.1 %d %s", statusCode, statusText))
+	w.writer.WriteString(fmt.Sprintf("HTTP/1.1 %d %s\r\n", statusCode, statusText))
 }
 
 func (w *mitmResponseWriter) Write(data []byte) (int, error) {
 	if !w.wroteHeader {
 		for k := range w.header {
 			val := w.header.Get(k)
-			w.writer.WriteString(fmt.Sprintf("%s: %s", k, val))
+			w.writer.WriteString(fmt.Sprintf("%s: %s\r\n", k, val))
 		}
 		w.wroteHeader = true
+		w.writer.Write([]byte("\r\n"))
 	}
 	return w.writer.Write(data)
 }
@@ -276,6 +273,9 @@ func hostCert(ca *tls.Certificate, dir, host string) (*tls.Certificate, error) {
 	}
 	if !isValidCert(ca, cert) {
 		return nil, fmt.Errorf("certificate is invalid")
+	}
+	if err = certToFile(cert, dir, host); err != nil {
+		fmt.Printf("Store cert for %s failed, %v\n", host, err)
 	}
 	return cert, nil
 }
