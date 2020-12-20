@@ -114,6 +114,8 @@ func (p Proxy) takeover(w http.ResponseWriter, r *http.Request) {
 		http.Error(mw, err.Error(), http.StatusBadRequest)
 		return
 	}
+	connectState := sconn.ConnectionState()
+	mr.TLS = &connectState
 
 	p.fn(mw, mr)
 }
