@@ -21,8 +21,14 @@ import (
 )
 
 func main() {
+    certFile := "ca-cert.pem"
+    keyFile := "ca-key.pem"
+    ca, err := tls.LoadX509KeyPair(certFile, keyFile)
+    if err != nil {
+        panic(err)
+    }
     opts := mitm.Options{
-        CA:     cert,
+        CA:     ca,
         Handle: mitmHandler,
     }
     proxy, err := mitm.New(opts)
