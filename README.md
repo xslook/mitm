@@ -20,6 +20,10 @@ import (
     "github.com/xslook/mitm"
 )
 
+func mitmHandler(w http.ResponseWriter, r *http.Request) {
+    // TODO: handle request/response here
+}
+
 func main() {
     certFile := "ca-cert.pem"
     keyFile := "ca-key.pem"
