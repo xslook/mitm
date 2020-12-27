@@ -13,6 +13,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"math/big"
 	"net"
@@ -22,46 +23,136 @@ import (
 	"time"
 )
 
-type Options struct {
-	Dir   string
-	Lease time.Duration
+const (
+	certOrg  = "MITM Certificate"
+	certUnit = "MITM"
+)
 
-	CA     *tls.Certificate
-	Handle http.HandlerFunc
-}
+// Rules for mitm proxy
+type Rules map[string]http.HandlerFunc
 
+// Proxy mitm requests
 type Proxy struct {
-	dir string
-	ca  *tls.Certificate
-	fn  http.HandlerFunc
+	dir   string
+	ca    *tls.Certificate
+	lease time.Duration
+
+	certOrg  string
+	certUnit string
+
+	rules Rules
 }
 
-func New(opt Options) (*Proxy, error) {
-	if opt.Dir == "" {
-		opt.Dir = os.TempDir()
+// copyHeader copy http headers from src to dst
+func copyHeader(dst, src http.Header) {
+	for k := range src {
+		v := src.Get(k)
+		dst.Set(k, v)
 	}
-	if opt.Handle == nil {
-		return nil, fmt.Errorf("invalid nil post-process handler function")
+}
+
+func httpHandler(w http.ResponseWriter, r *http.Request) {
+	res, err := http.DefaultClient.Do(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
 	}
+	defer res.Body.Close()
+
+	copyHeader(w.Header(), res.Header)
+	w.WriteHeader(res.StatusCode)
+	io.Copy(w, res.Body)
+}
+
+// Transparent pipe request and response, like a normal transparent proxy
+func Transparent(w http.ResponseWriter, r *http.Request) {
+	host, _, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	dconn, err := net.Dial("tcp", host)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer dconn.Close()
+
+	hijack, ok := w.(http.Hijacker)
+	if !ok {
+		httpHandler(w, r)
+		return
+	}
+	sconn, _, err := hijack.Hijack()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer sconn.Close()
+
+	go io.Copy(dconn, sconn)
+	go io.Copy(sconn, dconn)
+
+}
+
+// Option to custom proxy
+type Option func(*Proxy) error
+
+// Dir option
+// custom directory to store certificates
+func Dir(dir string) Option {
+	return func(p *Proxy) error {
+		p.dir = dir
+		return nil
+	}
+}
+
+// CA option
+// custom CA certificates to use as root CA, it will be used to sign sites' mitm certificates
+func CA(ca *tls.Certificate) Option {
+	return func(p *Proxy) error {
+		p.ca = ca
+		return nil
+	}
+}
+
+// New a mitm proxy
+func New(rules Rules, options ...Option) (*Proxy, error) {
 	p := &Proxy{
-		dir: opt.Dir,
-		ca:  opt.CA,
-		fn:  opt.Handle,
+		dir:   os.TempDir(),
+		ca:    nil,
+		rules: rules,
+	}
+	for _, op := range options {
+		if err := op(p); err != nil {
+			return nil, err
+		}
 	}
 	return p, nil
 }
 
 func (p Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	host, _, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	fn, ok := p.rules[host]
+	if !ok {
+		Transparent(w, r)
+		return
+	}
 	if r.Method != http.MethodConnect {
-		if p.fn != nil {
-			p.fn(w, r)
+		if fn != nil {
+			fn(w, r)
 		}
 		return
 	}
-	p.takeover(w, r)
+	p.takeover(w, r, fn)
 }
 
-func (p Proxy) takeover(w http.ResponseWriter, r *http.Request) {
+func (p Proxy) takeover(w http.ResponseWriter, r *http.Request, fn http.HandlerFunc) {
 	if p.ca == nil || len(p.ca.Certificate) < 1 {
 		http.Error(w, "invalid CA certificate", http.StatusInternalServerError)
 		return
@@ -117,7 +208,7 @@ func (p Proxy) takeover(w http.ResponseWriter, r *http.Request) {
 	connectState := sconn.ConnectionState()
 	mr.TLS = &connectState
 
-	p.fn(mw, mr)
+	fn(mw, mr)
 }
 
 type mitmResponseWriter struct {
@@ -281,11 +372,6 @@ func hostCert(ca *tls.Certificate, dir, host string) (*tls.Certificate, error) {
 	}
 	return cert, nil
 }
-
-const (
-	certOrg  = "MITM Certificate"
-	certUnit = "MITM"
-)
 
 func certNew(ca *tls.Certificate, host string) (*tls.Certificate, error) {
 	expiration := time.Now().AddDate(2, 3, 0)
