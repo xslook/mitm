@@ -64,17 +64,17 @@ func httpHandler(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, res.Body)
 }
 
-// Transparent pipe request and response, like a normal transparent proxy
-func Transparent(w http.ResponseWriter, r *http.Request) {
-	host, _, err := net.SplitHostPort(r.Host)
+// BypassHandler pipe request and response, like a normal transparent proxy
+func BypassHandler(w http.ResponseWriter, r *http.Request) {
+	host, port, err := net.SplitHostPort(r.Host)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	dconn, err := net.Dial("tcp", host)
+	dconn, err := net.Dial("tcp", fmt.Sprintf("%s:%s", host, port))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		http.Error(w, fmt.Sprintf("Dial %s failed: %v", r.Host, err), http.StatusServiceUnavailable)
 		return
 	}
 	defer dconn.Close()
@@ -93,7 +93,6 @@ func Transparent(w http.ResponseWriter, r *http.Request) {
 
 	go io.Copy(dconn, sconn)
 	go io.Copy(sconn, dconn)
-
 }
 
 // Option to custom proxy
@@ -140,7 +139,7 @@ func (p Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	fn, ok := p.rules[host]
 	if !ok {
-		Transparent(w, r)
+		BypassHandler(w, r)
 		return
 	}
 	if r.Method != http.MethodConnect {
