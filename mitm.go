@@ -18,6 +18,8 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/mail"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -383,13 +385,23 @@ func certNew(ca *tls.Certificate, host string) (*tls.Certificate, error) {
 	tpl := &x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			CommonName:         host,
 			Organization:       []string{certOrg},
 			OrganizationalUnit: []string{certUnit},
 		},
 		NotBefore: time.Now(), NotAfter: expiration,
 		KeyUsage: x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		tpl.IPAddresses = append(tpl.IPAddresses, ip)
+	} else if email, err := mail.ParseAddress(host); err == nil && email.Address == host {
+		tpl.EmailAddresses = append(tpl.EmailAddresses, host)
+	} else if uriName, err := url.Parse(host); err == nil && uriName.Scheme != "" && uriName.Host != "" {
+		tpl.URIs = append(tpl.URIs, uriName)
+	} else {
+		tpl.DNSNames = append(tpl.DNSNames, host)
+	}
+
 	parent, err := x509.ParseCertificate(ca.Certificate[0])
 	if err != nil {
 		return nil, err
