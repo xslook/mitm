@@ -39,6 +39,9 @@ type Proxy struct {
 	ca    *tls.Certificate
 	lease time.Duration
 
+	// default http handler function to handle unmatched requests
+	defaultHandler http.HandlerFunc
+
 	certOrg  string
 	certUnit string
 
@@ -118,12 +121,21 @@ func CA(ca *tls.Certificate) Option {
 	}
 }
 
+func Default(h http.HandlerFunc) Option {
+	return func(p *Proxy) error {
+		p.defaultHandler = h
+		return nil
+	}
+}
+
 // New a mitm proxy
 func New(rules Rules, options ...Option) (*Proxy, error) {
 	p := &Proxy{
 		dir:   os.TempDir(),
 		ca:    nil,
 		rules: rules,
+
+		defaultHandler: BypassHandler,
 	}
 	for _, op := range options {
 		if err := op(p); err != nil {
@@ -141,12 +153,18 @@ func (p Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	fn, ok := p.rules[host]
 	if !ok {
-		BypassHandler(w, r)
+		if r.Method != http.MethodConnect {
+			p.defaultHandler(w, r)
+		} else {
+			p.takeover(w, r, p.defaultHandler)
+		}
 		return
 	}
 	if r.Method != http.MethodConnect {
 		if fn != nil {
 			fn(w, r)
+		} else {
+			p.defaultHandler(w, r)
 		}
 		return
 	}
